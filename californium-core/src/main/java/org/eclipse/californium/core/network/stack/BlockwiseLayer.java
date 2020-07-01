@@ -336,7 +336,7 @@ public class BlockwiseLayer extends AbstractLayer {
 				status.cancelRequest();
 				clearBlock1Status(key, status);
 			}
-			status = getOutboundBlock1Status(key, exchange, request);
+			status = getOutboundBlock1Status(key, exchange, request, preferredBlockSize);
 
 			final Request block = status.getNextRequestBlock();
 			block.setDestinationContext(request.getDestinationContext());
@@ -630,6 +630,11 @@ public class BlockwiseLayer extends AbstractLayer {
 				case REQUEST_ENTITY_INCOMPLETE: // 4.08
 					// we seem to have uploaded blocks not in expected order
 				case REQUEST_ENTITY_TOO_LARGE: // 4.13
+					if (response.getOptions().hasBlock1()) {
+						// may be a block size negotiation
+						handleBlock1Response(exchange, response);
+						return;
+					}
 					// server is not able to process the payload we included
 					KeyUri key = getKey(exchange, exchange.getCurrentRequest());
 					Block1BlockwiseStatus status = getBlock1Status(key);
@@ -639,28 +644,7 @@ public class BlockwiseLayer extends AbstractLayer {
 				default:
 				}
 
-				// check, if response is for original request
-				if (exchange.getRequest() != exchange.getCurrentRequest()) {
-					// prepare the response as response to the original request
-					Response resp = new Response(response.getCode());
-					// adjust the token using the original request
-					resp.setToken(exchange.getRequest().getToken());
-					if (exchange.getRequest().getType() == Type.CON) {
-						resp.setType(Type.ACK);
-						// adjust MID also
-						resp.setMID(exchange.getRequest().getMID());
-					} else {
-						resp.setType(Type.NON);
-					}
-					resp.setSourceContext(response.getSourceContext());
-					resp.setPayload(response.getPayload());
-					resp.setOptions(response.getOptions());
-					resp.setRTT(exchange.calculateRTT());
-					exchange.setResponse(resp);
-					upper().receiveResponse(exchange, resp);
-				} else {
-					upper().receiveResponse(exchange, response);
-				}
+				deliverResponseToUpperLayer(exchange, response);
 				return;
 			}
 			
@@ -692,6 +676,31 @@ public class BlockwiseLayer extends AbstractLayer {
 
 		} else {
 			exchange.setResponse(response);
+			upper().receiveResponse(exchange, response);
+		}
+	}
+
+	private void deliverResponseToUpperLayer(final Exchange exchange, final Response response) {
+		// check, if response is for original request
+		if (exchange.getRequest() != exchange.getCurrentRequest()) {
+			// prepare the response as response to the original request
+			Response resp = new Response(response.getCode());
+			// adjust the token using the original request
+			resp.setToken(exchange.getRequest().getToken());
+			if (exchange.getRequest().getType() == Type.CON) {
+				resp.setType(Type.ACK);
+				// adjust MID also
+				resp.setMID(exchange.getRequest().getMID());
+			} else {
+				resp.setType(Type.NON);
+			}
+			resp.setSourceContext(response.getSourceContext());
+			resp.setPayload(response.getPayload());
+			resp.setOptions(response.getOptions());
+			resp.setRTT(exchange.calculateRTT());
+			exchange.setResponse(resp);
+			upper().receiveResponse(exchange, resp);
+		} else {
 			upper().receiveResponse(exchange, response);
 		}
 	}
@@ -731,10 +740,16 @@ public class BlockwiseLayer extends AbstractLayer {
 
 				clearBlock1Status(key, status);
 
+			} else if (response.getCode() == ResponseCode.REQUEST_ENTITY_TOO_LARGE) {
+				if (status.getCurrentNum() == 0 && block1.getSize() < status.getCurrentSize()) {
+					sendBlock(exchange, response, key, status, 0, block1.getSzx());
+				}else {
+					clearBlock1Status(key, status);
+					deliverResponseToUpperLayer(exchange,response);
+				}
 			} else if (!status.isComplete()) {
 
 				// this means that our last request's M-bit was set
-
 				if (block1.isM()) {
 					if (response.getCode() == ResponseCode.CONTINUE) {
 						// server wants us to send the remaining blocks before returning
@@ -778,7 +793,8 @@ public class BlockwiseLayer extends AbstractLayer {
 		}
 	}
 
-	private void sendNextBlock(final Exchange exchange, final Response response, final KeyUri key, final Block1BlockwiseStatus status) {
+	private void sendNextBlock(final Exchange exchange, final Response response, final KeyUri key,
+			final Block1BlockwiseStatus status) {
 
 		BlockOption block1 = response.getOptions().getBlock1();
 		int currentSize = status.getCurrentSize();
@@ -792,10 +808,15 @@ public class BlockwiseLayer extends AbstractLayer {
 			newSzx = status.getCurrentSzx();
 		}
 		int nextNum = status.getCurrentNum() + currentSize / newSize;
-		LOGGER.debug("sending next Block1 num={}", nextNum);
+		sendBlock(exchange, response, key, status, nextNum, newSzx);
+	}
+
+	private void sendBlock(final Exchange exchange, final Response response, final KeyUri key,
+			final Block1BlockwiseStatus status, int num, int szx) {
 		Request nextBlock = null;
+		LOGGER.debug("sending Block1 num={}", num);
 		try {
-			nextBlock = status.getNextRequestBlock(nextNum, newSzx);
+			nextBlock = status.getNextRequestBlock(num, szx);
 			// we use the same token to ease traceability
 			nextBlock.setToken(response.getToken());
 			nextBlock.setDestinationContext(status.getFollowUpEndpointContext(response.getSourceContext()));
@@ -1057,12 +1078,12 @@ public class BlockwiseLayer extends AbstractLayer {
 		}
 	}
 
-	private Block1BlockwiseStatus getOutboundBlock1Status(final KeyUri key, final Exchange exchange, final Request request) {
+	private Block1BlockwiseStatus getOutboundBlock1Status(final KeyUri key, final Exchange exchange, final Request request, int blocksize) {
 
 		synchronized (block1Transfers) {
 			Block1BlockwiseStatus status = block1Transfers.get(key);
 			if (status == null) {
-				status = Block1BlockwiseStatus.forOutboundRequest(exchange, request, preferredBlockSize);
+				status = Block1BlockwiseStatus.forOutboundRequest(exchange, request, blocksize);
 				block1Transfers.put(key, status);
 				enableStatus = true;
 				LOGGER.debug("created tracker for outbound block1 transfer {}, transfers in progress: {}", status,
