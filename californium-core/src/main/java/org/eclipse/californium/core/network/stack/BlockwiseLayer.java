@@ -807,7 +807,7 @@ public class BlockwiseLayer extends AbstractLayer {
 			newSize = currentSize;
 			newSzx = status.getCurrentSzx();
 		}
-		int nextNum = status.getCurrentNum() + currentSize / newSize;
+		int nextNum = (status.getCurrentNum() + 1) * status.getCurrentSize() / newSize;
 		sendBlock(exchange, response, key, status, nextNum, newSzx);
 	}
 
