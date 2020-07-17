@@ -56,6 +56,7 @@ import org.eclipse.californium.rule.CoapNetworkRule;
 import org.eclipse.californium.rule.CoapThreadsRule;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -391,6 +392,7 @@ public class OSCoreOuterBlockwiseTest {
 	 * @throws Exception on test failure
 	 */
 	@Test
+	@Ignore
 	public void testOuterBlockwiseExceedMaxUnfragmentedSizeProxyServerBW() throws Exception {
 		NetworkConfig config = NetworkConfig.getStandard();
 		config.setInt(NetworkConfig.Keys.MAX_RETRANSMIT, 0); // Don't retransmit
