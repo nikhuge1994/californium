@@ -76,6 +76,7 @@ import org.eclipse.californium.core.coap.MessageObserverAdapter;
 import org.eclipse.californium.core.coap.OptionSet;
 import org.eclipse.californium.core.coap.Request;
 import org.eclipse.californium.core.coap.Response;
+import org.eclipse.californium.core.coap.Token;
 import org.eclipse.californium.core.network.Exchange;
 import org.eclipse.californium.core.network.config.NetworkConfig;
 import org.eclipse.californium.core.network.config.NetworkConfigDefaults;
@@ -152,6 +153,10 @@ public class BlockwiseLayer extends AbstractLayer {
 	 * Currently, I send observe only in the first block so that it exactly
 	 * matches the example in the draft.
 	 */
+
+	// Minimal block size : 2^4 bytes
+	// (see https://tools.ietf.org/html/rfc7959#section-2.2)
+	private static final int MINIMAL_BLOCK_SIZE = 16;
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(BlockwiseLayer.class);
 	private static final Logger HEALTH_LOGGER = LoggerFactory.getLogger(LOGGER.getName() + ".health");
@@ -314,7 +319,7 @@ public class BlockwiseLayer extends AbstractLayer {
 				
 				if (requiresBlockwise(request)) {
 					// This must be a large POST or PUT request
-					requestToSend = startBlockwiseUpload(exchange, request);
+					requestToSend = startBlockwiseUpload(exchange, request, preferredBlockSize);
 				}
 			}
 		}
@@ -323,7 +328,7 @@ public class BlockwiseLayer extends AbstractLayer {
 		lower().sendRequest(exchange, requestToSend);
 	}
 
-	private Request startBlockwiseUpload(final Exchange exchange, final Request request) {
+	private Request startBlockwiseUpload(final Exchange exchange, final Request request, int blocksize) {
 
 		final KeyUri key = getKey(exchange, request);
 
@@ -336,10 +341,14 @@ public class BlockwiseLayer extends AbstractLayer {
 				status.cancelRequest();
 				clearBlock1Status(key, status);
 			}
-			status = getOutboundBlock1Status(key, exchange, request, preferredBlockSize);
+			status = getOutboundBlock1Status(key, exchange, request, blocksize);
 
 			final Request block = status.getNextRequestBlock();
 			block.setDestinationContext(request.getDestinationContext());
+			Token token = request.getToken();
+			if (token != null) {
+				block.setToken(token);
+			}
 			block.addMessageObserver(new MessageObserverAdapter() {
 
 				@Override
@@ -634,6 +643,28 @@ public class BlockwiseLayer extends AbstractLayer {
 						// may be a block size negotiation
 						handleBlock1Response(exchange, response);
 						return;
+					} else if (!exchange.getRequest().isCanceled()
+							&& !exchange.getCurrentRequest().getOptions().hasBlock1()) {
+						// We will retry with block1
+						Request request = exchange.getRequest();
+						// Calculate the max supported size to use
+						Integer maxSize = null;
+						if (response.getOptions().hasSize1() && response.getOptions().getSize1() >= MINIMAL_BLOCK_SIZE
+								&& response.getOptions().getSize1() < request.getPayloadSize()) {
+							maxSize = response.getOptions().getSize1();
+						} else if (request.getPayloadSize() > MINIMAL_BLOCK_SIZE) {
+							maxSize = request.getPayloadSize() - 1;
+						}
+
+						// Start blockwise if possible (else handle error as usual)
+						if (maxSize != null) {
+							int blocksize = Integer.highestOneBit(maxSize);
+							Request requestToSend = startBlockwiseUpload(exchange, request,
+									Math.min(blocksize, preferredBlockSize));
+							exchange.setCurrentRequest(requestToSend);
+							lower().sendRequest(exchange, requestToSend);
+							return;
+						}
 					}
 					// server is not able to process the payload we included
 					KeyUri key = getKey(exchange, exchange.getCurrentRequest());
@@ -725,10 +756,21 @@ public class BlockwiseLayer extends AbstractLayer {
 			Block1BlockwiseStatus status = getBlock1Status(key);
 
 			if (status == null) {
-
-				// request has not been sent blockwise
-				LOGGER.debug("discarding unexpected block1 response: {}", response);
-
+				if (response.getCode() == ResponseCode.REQUEST_ENTITY_TOO_LARGE) {
+					Request request = exchange.getRequest();
+					if (block1.getNum() == 0 && block1.getSize() < request.getPayloadSize()) {
+						// Start block1 transfer
+						Request blockRequest = startBlockwiseUpload(exchange, request,
+								Math.min(block1.getSize(), preferredBlockSize));
+						exchange.setCurrentRequest(blockRequest);
+						lower().sendRequest(exchange, blockRequest);
+					} else {
+						deliverResponseToUpperLayer(exchange, response);
+					}
+				} else {
+					// request has not been sent blockwise
+					LOGGER.debug("discarding unexpected block1 response: {}", response);
+				}
 			} else if (!status.hasMatchingToken(response)) {
 
 				// a concurrent block1 transfer has been started in the meantime
